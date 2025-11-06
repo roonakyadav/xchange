@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  reactStrictMode: true,
+  // devIndicators intentionally omitted to avoid TypeScript type issues
   images: {
     remotePatterns: [
       {
