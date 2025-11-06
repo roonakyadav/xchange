@@ -1,0 +1,39 @@
+/* Background Ribbons Styles */
+.ribbon-text {
+    font-size: clamp(64px, 12vw, 220px);
+    white-space: nowrap;
+    font-weight: 900;
+    letter-spacing: 0.02em;
+    line-height: 1;
+    font-family: 'Anton', 'Impact', sans-serif;
+}
+
+.ribbon-container {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.ribbon-element {
+    position: absolute;
+    will-change: transform, opacity;
+    transform-origin: center;
+    backface-visibility: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .ribbon-text {
+        font-size: clamp(48px, 15vw, 120px);
+    }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+    .ribbon-element {
+        animation: none !important;
+    }
+}

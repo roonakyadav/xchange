@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
-import { listMessages, markThreadRead } from '@/lib/db'
+import { getChatMessages, markThreadRead } from '@/lib/db'
 import type { Message } from '@/types'
 import type { RealtimeChannel } from '@supabase/supabase-js'
 
@@ -49,7 +49,7 @@ export function useChatMessages(chatId: string, currentUser?: string) {
         if (!chatId) return
 
         try {
-            const messageData = await listMessages(chatId)
+            const messageData = await getChatMessages(chatId)
             upsertMessages(messageData)
         } catch (error) {
             console.error('Failed to load messages:', error)
@@ -59,7 +59,7 @@ export function useChatMessages(chatId: string, currentUser?: string) {
     const setupRealtimeSubscription = useCallback(() => {
         if (!chatId || !currentUser || isSubscribedRef.current) return
 
-        console.log(`Setting up realtime subscription for chat ${chatId}`)
+        console.log(`🔄 [SETUP_REALTIME] Setting up realtime subscription for chat ${chatId}`)
 
         // Clean up existing subscription
         if (channelRef.current) {
@@ -76,24 +76,26 @@ export function useChatMessages(chatId: string, currentUser?: string) {
                     filter: `chat_id=eq.${chatId}`,
                 },
                 async (payload) => {
-                    console.log('📩 INSERT', payload.new?.id, payload.new?.chat_id)
+                    console.log('📩 [MESSAGE_INSERT]', payload.new?.id, 'chat_id:', payload.new?.chat_id)
                     const msg = payload.new as Message
                     if (!msg) return
 
                     // Verify this message belongs to our chat
                     if (String(msg.chat_id) !== String(chatId)) {
-                        console.log('Ignoring message for different chat:', msg.chat_id, 'vs', chatId)
+                        console.log('🚫 [MESSAGE_INSERT] Ignoring message for different chat:', msg.chat_id, 'vs', chatId)
                         return
                     }
 
+                    console.log('✅ [MESSAGE_INSERT] Adding message to local state')
                     upsertMessages(msg)
 
                     // Auto-mark read if from other user and page visible
                     if (msg.sender !== currentUser && document.visibilityState === 'visible') {
+                        console.log('🔖 [MESSAGE_INSERT] Auto-marking thread as read')
                         try {
                             await markThreadRead(chatId, currentUser)
                         } catch (error) {
-                            console.error('Failed to mark thread read:', error)
+                            console.error('❌ [MESSAGE_INSERT] Failed to mark thread read:', error)
                         }
                     }
                 }
@@ -107,21 +109,22 @@ export function useChatMessages(chatId: string, currentUser?: string) {
                     filter: `chat_id=eq.${chatId}`,
                 },
                 (payload) => {
-                    console.log('📩 UPDATE', payload.new?.id, payload.new?.chat_id)
+                    console.log('🔄 [MESSAGE_UPDATE]', payload.new?.id, 'chat_id:', payload.new?.chat_id, 'is_read:', payload.new?.is_read)
                     const msg = payload.new as Message
                     if (!msg) return
 
                     // Verify this message belongs to our chat
                     if (String(msg.chat_id) !== String(chatId)) {
-                        console.log('Ignoring update for different chat:', msg.chat_id, 'vs', chatId)
+                        console.log('🚫 [MESSAGE_UPDATE] Ignoring update for different chat:', msg.chat_id, 'vs', chatId)
                         return
                     }
 
+                    console.log('✅ [MESSAGE_UPDATE] Updating message in local state')
                     upsertMessages(msg)
                 }
             )
             .subscribe((status) => {
-                console.log('🔌 sub status', status)
+                console.log('🔌 [REALTIME_STATUS]', status)
                 isSubscribedRef.current = status === 'SUBSCRIBED'
             })
 

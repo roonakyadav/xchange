@@ -121,32 +121,80 @@ export function updateTypingStatus(
     })
 }
 
-// Chat updates subscription (for unread counters, last message)
+// Chat updates subscription (for unread counters, last message, new chats, re-activation)
 export function subscribeToChatUpdates(
     username: string,
     onChatUpdate: () => void
 ): RealtimeChannel {
+    console.log(`🔄 [CHAT_SUBSCRIBE] Setting up chat updates for user: ${username}`)
+
     const channel = supabase
         .channel(`chats-${username}`)
+        // Listen for new chats involving this user
         .on(
             'postgres_changes',
             {
-                event: '*',
+                event: 'INSERT',
                 schema: 'public',
                 table: 'chats',
                 filter: `user1=eq.${username}`,
             },
-            () => onChatUpdate()
+            (payload) => {
+                console.log('🆕 [CHAT_INSERT] New chat for user1:', payload.new?.id)
+                onChatUpdate()
+            }
         )
         .on(
             'postgres_changes',
             {
-                event: '*',
+                event: 'INSERT',
                 schema: 'public',
                 table: 'chats',
                 filter: `user2=eq.${username}`,
             },
-            () => onChatUpdate()
+            (payload) => {
+                console.log('🆕 [CHAT_INSERT] New chat for user2:', payload.new?.id)
+                onChatUpdate()
+            }
+        )
+        // Listen for chat updates (last message, unread counts, deleted flag changes)
+        .on(
+            'postgres_changes',
+            {
+                event: 'UPDATE',
+                schema: 'public',
+                table: 'chats',
+                filter: `user1=eq.${username}`,
+            },
+            (payload) => {
+                console.log('🔄 [CHAT_UPDATE] Chat update for user1:', payload.new?.id, {
+                    last_message: payload.new?.last_message?.substring(0, 20) + '...',
+                    unread_user1: payload.new?.unread_user1,
+                    unread_user2: payload.new?.unread_user2,
+                    deleted_by_user1: payload.new?.deleted_by_user1,
+                    deleted_by_user2: payload.new?.deleted_by_user2
+                })
+                onChatUpdate()
+            }
+        )
+        .on(
+            'postgres_changes',
+            {
+                event: 'UPDATE',
+                schema: 'public',
+                table: 'chats',
+                filter: `user2=eq.${username}`,
+            },
+            (payload) => {
+                console.log('🔄 [CHAT_UPDATE] Chat update for user2:', payload.new?.id, {
+                    last_message: payload.new?.last_message?.substring(0, 20) + '...',
+                    unread_user1: payload.new?.unread_user1,
+                    unread_user2: payload.new?.unread_user2,
+                    deleted_by_user1: payload.new?.deleted_by_user1,
+                    deleted_by_user2: payload.new?.deleted_by_user2
+                })
+                onChatUpdate()
+            }
         )
         // Listen for new messages to update chat list
         .on(
@@ -157,13 +205,29 @@ export function subscribeToChatUpdates(
                 table: 'messages',
             },
             (payload) => {
-                console.log("📩 realtime INSERT for chat list", payload)
+                console.log("📩 [MESSAGE_INSERT] Message inserted, chat_id:", payload.new?.chat_id)
                 // Trigger update for chat list when any message is inserted
                 // The ChatList component will filter to only show relevant chats
                 onChatUpdate()
             }
         )
-        .subscribe()
+        // Listen for message read status updates to update preview
+        .on(
+            'postgres_changes',
+            {
+                event: 'UPDATE',
+                schema: 'public',
+                table: 'messages',
+            },
+            (payload) => {
+                console.log("♻ [MESSAGE_UPDATE] Message update, id:", payload.new?.id, "is_read:", payload.new?.is_read)
+                // Trigger update when is_read changes (for "Seen ..." preview updates)
+                onChatUpdate()
+            }
+        )
+        .subscribe((status) => {
+            console.log(`🔌 [CHAT_SUBSCRIBE] Subscription status: ${status}`)
+        })
 
     return channel
 }

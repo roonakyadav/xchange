@@ -1,4 +1,5 @@
 import { supabase } from './supabase'
+import { formatTimeAgo } from './time'
 import bcrypt from 'bcryptjs'
 import type { User, Post, Chat, Message, PostWithUser, ChatWithPost, ChatWithMessages } from '@/types'
 
@@ -620,7 +621,16 @@ export async function listMessages(chatId: string, options?: { limit?: number; b
 }
 
 export async function sendMessage({ chatId, sender, body }: { chatId: string; sender: string; body: string }): Promise<Message> {
-    const { data, error } = await supabase
+    console.log('📤 [SEND_MESSAGE] chatId:', chatId, 'sender:', sender, 'body length:', body.length)
+
+    // First ensure the chat exists and get its details
+    const chat = await getChatById(chatId)
+    if (!chat) {
+        throw new Error('Chat not found')
+    }
+
+    // Insert the message
+    const { data: message, error: messageError } = await supabase
         .from('messages')
         .insert({
             chat_id: chatId,
@@ -631,11 +641,74 @@ export async function sendMessage({ chatId, sender, body }: { chatId: string; se
         .select()
         .single()
 
-    if (error) {
-        throw new Error(`Failed to send message: ${error.message}`)
+    if (messageError) {
+        console.error('❌ [SEND_MESSAGE] Failed to insert message:', messageError)
+        throw new Error(`Failed to send message: ${messageError.message}`)
     }
 
-    return data
+    console.log('✅ [SEND_MESSAGE] Message inserted:', message.id)
+
+    // Update chat with last message info (deterministic upsert)
+    const updateData: any = {
+        last_message: body,
+        last_sender: sender,
+        updated_at: new Date().toISOString()
+    }
+
+    // Update unread counts
+    if (chat.user1 === sender) {
+        updateData.unread_user2 = (chat.unread_user2 || 0) + 1
+    } else {
+        updateData.unread_user1 = (chat.unread_user1 || 0) + 1
+    }
+
+    const { error: chatError } = await supabase
+        .from('chats')
+        .update(updateData)
+        .eq('id', chatId)
+
+    if (chatError) {
+        console.error('❌ [SEND_MESSAGE] Failed to update chat:', chatError)
+        // Don't throw here - message was sent successfully, just log the error
+    } else {
+        console.log('✅ [SEND_MESSAGE] Chat updated with last message')
+    }
+
+    return message
+}
+
+// Send message to a user, creating chat if it doesn't exist
+export async function sendMessageToUser({
+    sender,
+    recipient,
+    body,
+    postId
+}: {
+    sender: string
+    recipient: string
+    body: string
+    postId?: string
+}): Promise<{ message: Message; chat: Chat }> {
+    console.log('📤 [SEND_MESSAGE_TO_USER] sender:', sender, 'recipient:', recipient, 'body length:', body.length)
+
+    // Get or create chat
+    const chat = await getOrCreateChat({
+        user1: sender,
+        user2: recipient,
+        postId
+    })
+
+    console.log('✅ [SEND_MESSAGE_TO_USER] Chat ready:', chat.id)
+
+    // Send message using existing chat
+    const message = await sendMessage({
+        chatId: chat.id,
+        sender,
+        body
+    })
+
+    console.log('✅ [SEND_MESSAGE_TO_USER] Message sent successfully')
+    return { message, chat }
 }
 
 export async function markDelivered(chatId: string, messageIds: string[]): Promise<void> {
@@ -653,29 +726,87 @@ export async function markDelivered(chatId: string, messageIds: string[]): Promi
 
 export async function markThreadRead(chatId: string, me: string) {
     console.log('🔖 [MARK_THREAD_READ] chatId:', chatId, 'user:', me)
-    return supabase
+
+    // Get chat details first to determine which field to update
+    const chat = await getChatById(chatId)
+    if (!chat) {
+        throw new Error('Chat not found')
+    }
+
+    // First mark messages as read
+    const { data: updatedMessages, error: messageError } = await supabase
         .from('messages')
         .update({ is_read: true, read_at: new Date().toISOString() })
         .eq('chat_id', chatId)
         .neq('sender', me)
         .eq('is_read', false)
-}
+        .select()
 
-export async function deleteChat(chatId: string): Promise<void> {
-    const { error } = await supabase
+    if (messageError) {
+        console.error('❌ [MARK_THREAD_READ] Failed to mark messages as read:', messageError)
+        throw new Error(`Failed to mark thread read: ${messageError.message}`)
+    }
+
+    console.log(`✅ [MARK_THREAD_READ] Marked ${updatedMessages?.length || 0} messages as read`)
+
+    // Reset unread counter for current user in chat table
+    const updateField = chat.user1 === me ? 'unread_user1' : 'unread_user2'
+    const { error: chatError } = await supabase
         .from('chats')
-        .delete()
+        .update({ [updateField]: 0 })
         .eq('id', chatId)
 
-    if (error) throw error
+    if (chatError) {
+        console.error('❌ [MARK_THREAD_READ] Failed to reset unread counter:', chatError)
+        // Don't throw here - messages were marked as read successfully
+    } else {
+        console.log('✅ [MARK_THREAD_READ] Reset unread counter in chat table')
+    }
+
+    return updatedMessages
+}
+
+export async function deleteChatForMe(chatId: string, me: string, user1: string, user2: string) {
+    const field = me === user1 ? 'deleted_by_user1' : 'deleted_by_user2';
+    console.log("🗑 deleteChatForMe", chatId, field);
+    return supabase.from('chats').update({ [field]: true }).eq('id', chatId);
+}
+
+export async function deleteChat(chatId: string, currentUser: string): Promise<void> {
+    // First get the chat to determine which user field to update
+    const { data: chat, error: fetchError } = await supabase
+        .from('chats')
+        .select('user1, user2')
+        .eq('id', chatId)
+        .single()
+
+    if (fetchError) {
+        throw new Error(`Failed to fetch chat: ${fetchError.message}`)
+    }
+
+    if (!chat) {
+        throw new Error('Chat not found')
+    }
+
+    // Determine which field to update based on current user
+    const updateField = chat.user1 === currentUser ? 'deleted_by_user1' : 'deleted_by_user2'
+
+    const { error } = await supabase
+        .from('chats')
+        .update({ [updateField]: true })
+        .eq('id', chatId)
+
+    if (error) {
+        throw new Error(`Failed to delete chat: ${error.message}`)
+    }
 }
 
 export async function blockUser(blocker: string, blocked: string): Promise<void> {
     const { error } = await supabase
-        .from('blocks')
+        .from('blocked_users')
         .insert({
-            blocker,
-            blocked,
+            blocker_id: blocker,
+            blocked_id: blocked,
         })
 
     if (error) {
@@ -683,19 +814,20 @@ export async function blockUser(blocker: string, blocked: string): Promise<void>
     }
 }
 
-export async function isUserBlocked(user1: string, user2: string): Promise<boolean> {
-    const { data, error } = await supabase
-        .from('blocks')
-        .select('id')
-        .or(`and(blocker.eq.${user1},blocked.eq.${user2}),and(blocker.eq.${user2},blocked.eq.${user1})`)
-        .single()
-
-    if (error && error.code !== 'PGRST116') {
-        console.error('Error checking block status:', error)
+export async function isUserBlocked(currentUser: string, targetUser: string) {
+    try {
+        const { data, error } = await supabase
+            .from('blocked_users')
+            .select('*')
+            .eq('blocker_id', currentUser)
+            .eq('blocked_id', targetUser)
+            .single()
+        if (error && error.code !== 'PGRST116') throw error
+        return !!data
+    } catch (err) {
+        console.error('Error checking block status:', err)
         return false
     }
-
-    return !!data
 }
 
 // Chat preview functions for chat list
@@ -716,8 +848,11 @@ export interface ChatPreview {
     otherUser: string
 }
 
-export async function getChatPreviews(username: string): Promise<ChatPreview[]> {
-    // Get all chats for user that have at least one message
+export async function getVisibleChats(username: string): Promise<ChatPreview[]> {
+    console.log(`👀 [GET_VISIBLE_CHATS] Fetching visible chats for user: ${username}`)
+
+    // Get all chats for user that are not deleted by current user
+    // Use a more efficient query that gets chats with their last message in one go
     const { data: chats, error: chatsError } = await supabase
         .from('chats')
         .select(`
@@ -725,58 +860,139 @@ export async function getChatPreviews(username: string): Promise<ChatPreview[]> 
             posts (
                 title,
                 image_url
-            ),
-            messages!inner(*)
+            )
         `)
         .or(`user1.eq.${username},user2.eq.${username}`)
-        .order('updated_at', { ascending: false })
+        .order('updated_at', { ascending: false, nullsFirst: false })
 
     if (chatsError) {
+        console.error('❌ [GET_VISIBLE_CHATS] Failed to get chats:', chatsError)
         throw new Error(`Failed to get chats: ${chatsError.message}`)
     }
 
     if (!chats || chats.length === 0) {
+        console.log('ℹ️ [GET_VISIBLE_CHATS] No chats found for user')
         return []
     }
 
-    // Get last message and unread counts for each chat
-    const chatPreviews: ChatPreview[] = []
+    console.log(`📋 [GET_VISIBLE_CHATS] Found ${chats.length} total chats, filtering visible ones...`)
+
+    // Filter chats based on visibility rules and get message data
+    const visibleChats: ChatPreview[] = []
 
     for (const chat of chats) {
+        // Check if chat is deleted by current user
+        const isDeletedByMe = (chat.user1 === username && chat.deleted_by_user1) ||
+            (chat.user2 === username && chat.deleted_by_user2)
+
+        if (isDeletedByMe) {
+            console.log(`🚫 [GET_VISIBLE_CHATS] Skipping deleted chat: ${chat.id}`)
+            continue
+        }
+
         const otherUser = chat.user1 === username ? chat.user2 : chat.user1
 
-        // Get last message (we know it exists since we used inner join)
-        const { data: lastMessage, error: messageError } = await supabase
+        // Check if the other user is blocked by current user
+        const isBlockedByMe = await isUserBlocked(username, otherUser)
+        if (isBlockedByMe) {
+            console.log(`🚫 [GET_VISIBLE_CHATS] Skipping chat with blocked user: ${chat.id}`)
+            continue
+        }
+
+        // Check if current user is blocked by the other user
+        const isBlockedByOther = await isUserBlocked(otherUser, username)
+        if (isBlockedByOther) {
+            console.log(`🚫 [GET_VISIBLE_CHATS] Skipping chat where current user is blocked: ${chat.id}`)
+            continue
+        }
+
+        // Get all messages for this chat to calculate unread counts
+        const { data: messages, error: messagesError } = await supabase
             .from('messages')
             .select('*')
             .eq('chat_id', chat.id)
             .order('created_at', { ascending: false })
-            .limit(1)
-            .single()
 
-        if (messageError) {
-            console.error('Error getting last message:', messageError)
-            continue // Skip this chat if we can't get the last message
+        if (messagesError) {
+            console.error(`❌ [GET_VISIBLE_CHATS] Error getting messages for chat ${chat.id}:`, messagesError)
+            continue
         }
 
-        // Calculate unreadIncoming: messages from other user that are not read by me
-        const unreadIncoming = chat.messages.filter((m: Message) =>
-            m.sender !== username && !m.is_read
-        ).length
+        // Skip chats with no messages (shouldn't happen with proper upsert, but safety check)
+        if (!messages || messages.length === 0) {
+            console.log(`⚠️ [GET_VISIBLE_CHATS] Skipping chat ${chat.id} with no messages`)
+            continue
+        }
 
-        // Calculate unreadOutgoing: messages from me that are not read by them
-        const unreadOutgoing = chat.messages.filter((m: Message) =>
-            m.sender === username && !m.is_read
-        ).length
+        // Get the last message
+        const lastMessage = messages[0]
 
-        chatPreviews.push({
+        // Calculate unread counts using the stored unread counters from the chat table
+        // This is more efficient than recalculating from all messages
+        const unreadCount = chat.user1 === username ? (chat.unread_user1 || 0) : (chat.unread_user2 || 0)
+        const outgoingPendingCount = chat.user1 === username ? (chat.unread_user2 || 0) : (chat.unread_user1 || 0)
+
+        console.log(`✅ [GET_VISIBLE_CHATS] Including chat ${chat.id} with ${messages.length} messages, unread: ${unreadCount}`)
+
+        visibleChats.push({
             ...chat,
-            lastMessage: lastMessage || undefined,
-            unreadCount: unreadIncoming,
-            outgoingPendingCount: unreadOutgoing,
+            lastMessage,
+            unreadCount,
+            outgoingPendingCount,
             otherUser,
         })
     }
 
-    return chatPreviews
+    console.log(`🎯 [GET_VISIBLE_CHATS] Returning ${visibleChats.length} visible chats`)
+    return visibleChats
+}
+
+export async function getChatMessages(chatId: string): Promise<Message[]> {
+    const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('chat_id', chatId)
+        .order('created_at', { ascending: true, nullsFirst: false })
+
+    if (error) {
+        throw new Error(`Failed to get messages: ${error.message}`)
+    }
+
+    return data || []
+}
+
+export function computePreview(me: string, messages: Message[]): string {
+    if (!messages || messages.length === 0) return 'Say hi 👋'
+
+    const unreadIncoming = messages.filter(m => m.sender !== me && !m.is_read).length
+    const unreadOutgoing = messages.filter(m => m.sender === me && !m.is_read).length
+    const last = messages[messages.length - 1]
+
+    // Priority 1: unreadIncoming > 0 → bold "{unreadIncoming} unread messages"
+    if (unreadIncoming > 0) {
+        return `**${unreadIncoming} unread message${unreadIncoming > 1 ? 's' : ''}**`
+    }
+
+    // Priority 2: last.sender != me → last.body (truncate)
+    if (last && last.sender !== me) {
+        return last.body.length > 50 ? last.body.substring(0, 50) + '...' : last.body
+    }
+
+    // Priority 3: unreadOutgoing > 0 → "{unreadOutgoing} messages sent"
+    if (unreadOutgoing > 0) {
+        return `${unreadOutgoing} message${unreadOutgoing > 1 ? 's' : ''} sent`
+    }
+
+    // Priority 4: last.read_at exists → "Seen {timeAgo(last.read_at)}"
+    if (last?.read_at) {
+        return `Seen ${formatTimeAgo(last.read_at)}`
+    }
+
+    // Fallback
+    return last?.body || 'Say hi 👋'
+}
+
+// Legacy function for backward compatibility
+export async function getChatPreviews(username: string): Promise<ChatPreview[]> {
+    return getVisibleChats(username)
 }

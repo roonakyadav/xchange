@@ -76,16 +76,25 @@ export default function ChatThread({ chatId }: ChatThreadProps) {
         markThreadRead(chatId, user.username).catch(console.error)
     }, [chatId, user, router])
 
-    // Mark unread messages as read when window becomes visible
+    // Mark unread messages as read when window becomes visible (debounced)
     useEffect(() => {
+        let timeoutId: NodeJS.Timeout
+
         const handleVisibilityChange = () => {
             if (!document.hidden && user) {
-                markThreadRead(chatId, user.username).catch(console.error)
+                // Debounce for 300ms to avoid excessive calls
+                clearTimeout(timeoutId)
+                timeoutId = setTimeout(() => {
+                    markThreadRead(chatId, user.username).catch(console.error)
+                }, 300)
             }
         }
 
         document.addEventListener('visibilitychange', handleVisibilityChange)
-        return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange)
+            clearTimeout(timeoutId)
+        }
     }, [chatId, user])
 
     // Set up typing and read status subscriptions
@@ -197,7 +206,10 @@ export default function ChatThread({ chatId }: ChatThreadProps) {
             setNewMessage(messageText)
         } finally {
             setSending(false)
-            inputRef.current?.focus()
+            // Keep focus on desktop after sending, but not on mobile
+            if (!isMobile) {
+                requestAnimationFrame(() => inputRef.current?.focus())
+            }
         }
     }
 
@@ -205,6 +217,9 @@ export default function ChatThread({ chatId }: ChatThreadProps) {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault()
             handleSendMessage(e)
+            if (!isMobile) {
+                requestAnimationFrame(() => inputRef.current?.focus())
+            }
         }
     }
 
@@ -386,8 +401,10 @@ export default function ChatThread({ chatId }: ChatThreadProps) {
                         disabled={sending}
                     />
                     <button
-                        type="submit"
+                        type="button"
                         disabled={!newMessage.trim() || sending}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={handleSendMessage}
                         className="bg-red-500 hover:bg-red-600 disabled:bg-red-300 text-white px-6 py-3 rounded-2xl font-medium transition-colors disabled:cursor-not-allowed"
                     >
                         {sending ? '...' : 'Send'}

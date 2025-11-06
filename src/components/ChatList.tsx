@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useRouter } from 'next/navigation'
 import Image from 'next/image'
-import { getChatPreviews, isUserBlocked } from '@/lib/db'
+import { getVisibleChats, computePreview, isUserBlocked } from '@/lib/db'
 import { subscribeToChatUpdates } from '@/lib/realtime'
 import { formatTimeAgo } from '@/lib/time'
 import { useUser } from '@/hooks/useUser'
@@ -49,7 +49,7 @@ export default function ChatList({ onChatSelect }: ChatListProps) {
         if (!user) return
 
         try {
-            const chatData = await getChatPreviews(user.username)
+            const chatData = await getVisibleChats(user.username)
             setChats(chatData)
         } catch (error) {
             console.error('Failed to load chats:', error)
@@ -72,24 +72,24 @@ export default function ChatList({ onChatSelect }: ChatListProps) {
     const getPreviewText = (chat: ChatPreview) => {
         const { unreadCount, outgoingPendingCount, lastMessage } = chat
 
-        // unreadIncoming > 0 → "{unreadIncoming} unread messages"
+        // Priority 1: if unreadIncoming > 0 → bold "{unreadIncoming} unread messages"
         if (unreadCount > 0) {
-            return `${unreadCount} unread message${unreadCount > 1 ? 's' : ''}`
+            return `**${unreadCount} unread message${unreadCount > 1 ? 's' : ''}**`
         }
 
-        // last.sender !== me → last.body (1-line truncate)
+        // Priority 2: else if last.sender != me → last.body (1-line truncate)
         if (lastMessage && lastMessage.sender !== user?.username) {
             return lastMessage.body.length > 50
                 ? lastMessage.body.substring(0, 50) + '...'
                 : lastMessage.body
         }
 
-        // unreadOutgoing > 0 → "{unreadOutgoing} messages sent"
+        // Priority 3: else if unreadOutgoing > 0 → "{unreadOutgoing} messages sent"
         if (outgoingPendingCount > 0) {
             return `${outgoingPendingCount} message${outgoingPendingCount > 1 ? 's' : ''} sent`
         }
 
-        // else → "Seen {timeAgo(last.read_at)}"
+        // Priority 4: else → "Seen {timeAgo(last.read_at)}"
         if (lastMessage && lastMessage.is_read && lastMessage.read_at) {
             return `Seen ${formatTimeAgo(lastMessage.read_at)}`
         }

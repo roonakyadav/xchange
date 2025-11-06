@@ -31,6 +31,8 @@ export interface Chat {
     last_sender?: string
     unread_user1?: number
     unread_user2?: number
+    deleted_by_user1?: boolean
+    deleted_by_user2?: boolean
 }
 
 export interface Message {
